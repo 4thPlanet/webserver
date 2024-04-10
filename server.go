@@ -28,44 +28,6 @@ type Server[S any] struct {
 // Set up generic sessions (applied to Server), with NewServerWithoutSessions() returning a mocked session provider?
 // Still have request.Body problem but is a bit less of an issue..
 
-type Request struct {
-	req             http.Request
-	Session         interface{}
-	Verb            Verb
-	Path            string
-	Headers         http.Header
-	Cookies         []*http.Cookie
-	Body            interface{} // TODO: generic without breaking Request logic?
-	Context         context.Context
-	ResponseHeaders http.Header
-}
-
-func (req *Request) SetCookie(cookie http.Cookie) {
-	req.ResponseHeaders.Set("set-cookie", cookie.String())
-}
-
-type Route[B any, T any] struct {
-	path        string
-	middlewares []Middleware
-	websocket   WebsocketHandler
-	eventStream EventStreamHandler
-	handlers    map[Verb]func(req *Request) (T, error)
-}
-
-func (r *Route[B, T]) Middleware(mw Middleware) {
-	r.middlewares = append(r.middlewares, mw)
-}
-
-func (r *Route[B, T]) Websocket(handler WebsocketHandler) {
-	r.websocket = handler
-}
-
-var eventStreamMessagePrefix = []byte("data: ")
-
-func (r *Route[B, T]) EventStream(handler EventStreamHandler) {
-	r.eventStream = handler
-}
-
 type Middleware func(req *Request) error
 type WebsocketHandler func(req *Request, inFeed <-chan []byte) <-chan []byte
 type EventStreamHandler func(req *Request) <-chan EventStreamer
