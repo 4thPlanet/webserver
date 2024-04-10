@@ -18,9 +18,10 @@ import (
 )
 
 type Server[S any] struct {
-	sessionStore SessionStore
-	middlewares  []Middleware
-	mux          *http.ServeMux
+	sessionStore          SessionStore
+	middlewares           []Middleware
+	contentTypeInterfaces map[string]reflect.Type
+	mux                   *http.ServeMux
 }
 
 // How to do generic-less server, with generic sessions (server-level) and request.Body data (route-level)?
@@ -71,12 +72,43 @@ type EventStreamHandler func(req *Request) <-chan EventStreamer
 
 func New[S any](sessionStore SessionStore) *Server[S] {
 	s := &Server[S]{
-		middlewares:  make([]Middleware, 0),
-		sessionStore: sessionStore,
-		mux:          http.NewServeMux(),
+		middlewares:           make([]Middleware, 0),
+		sessionStore:          sessionStore,
+		contentTypeInterfaces: make(map[string]reflect.Type),
+		mux:                   http.NewServeMux(),
 	}
 
+	s.RegisterContentTypeInterface("html", (*Htmler)(nil))
+	s.RegisterContentTypeInterface("csv", (*Csver)(nil))
+	s.RegisterContentTypeInterface("json", (*Jsoner)(nil))
+
 	return s
+}
+
+func (s *Server[S]) RegisterContentTypeInterface(contentType string, i interface{}) {
+	// i must be an interface
+	reflection := reflect.TypeOf(i)
+	if reflection.Kind() == reflect.Pointer {
+		reflection = reflection.Elem()
+	}
+	if reflection.Kind() != reflect.Interface {
+		panic("type of i is not an interface.")
+	}
+
+	// i must have a single method defined
+	if reflection.NumMethod() != 1 {
+		panic("interface must implement a single method with no arguments returning []byte")
+	}
+
+	// That method must accept 0 arguments, and output a single []byte
+	fn := reflection.Method(0).Type
+	if fn.NumIn() != 0 ||
+		fn.NumOut() != 1 ||
+		fn.Out(0) != byteSlice {
+		panic("interface must implement a single method with no arguments returning []byte")
+	}
+
+	s.contentTypeInterfaces[contentType] = reflection
 }
 
 func (s *Server[S]) Middleware(mw Middleware) {
@@ -98,7 +130,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	}
 
 	implements := map[string]bool{}
-	for t, i := range contentTypeInterfaces {
+	for t, i := range s.contentTypeInterfaces {
 		implements[t] = reflect.TypeOf(new(T)).Elem().Implements(i)
 	}
 
@@ -147,7 +179,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 		for _, contentType := range acceptedContentTypes {
 			// is contentTypeInterfaces[contentType] set?
-			responseInterface, isset = contentTypeInterfaces[contentType]
+			responseInterface, isset = s.contentTypeInterfaces[contentType]
 			if isset && !implements[contentType] {
 				isset = false
 				responseInterface = nil
@@ -155,14 +187,14 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			if !isset {
 				// split on /, look at second value
 				parts := strings.Split(contentType, "/")
-				responseInterface, isset = contentTypeInterfaces[parts[1]]
+				responseInterface, isset = s.contentTypeInterfaces[parts[1]]
 				if isset && !implements[parts[1]] {
 					isset = false
 					responseInterface = nil
 				}
 
 				if !isset && parts[1] == "*" {
-					responseInterface, isset = contentTypeInterfaces[parts[0]]
+					responseInterface, isset = s.contentTypeInterfaces[parts[0]]
 					if isset && !implements[parts[0]] {
 						isset = false
 						responseInterface = nil

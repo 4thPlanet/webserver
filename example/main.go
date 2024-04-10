@@ -77,11 +77,24 @@ type PageViews struct {
 }
 
 func (pv *PageViews) AsHtml() []byte {
+	// Execute main
+	// Pass in bar as Content
 	var buf bytes.Buffer
-	content := fmt.Sprintf(`<p>This page has been viewed %d times, including %d from this session.</p>`, pv.Total, pv.Session)
-	tpl.Execute(&buf, map[string]interface{}{
-		"Content": template.HTML(content),
+	var content bytes.Buffer
+
+	err := tpl.ExecuteTemplate(&content, "pageviews", pv)
+	if err != nil {
+		log.Println("Error executing bar template: ", err)
+		return nil
+	}
+
+	err = tpl.ExecuteTemplate(&buf, "main", map[string]interface{}{
+		"Content": template.HTML(content.Bytes()),
 	})
+	if err != nil {
+		log.Println("Error executing main template:", err)
+		return nil
+	}
 	return buf.Bytes()
 }
 
@@ -89,6 +102,9 @@ func (pv *PageViews) XML() []byte {
 	return []byte(fmt.Sprintf(`<Views><Total>%d</Total><Session>%d</Session></Views>`, pv.Total, pv.Session))
 }
 
+type Anythinger interface {
+	Anything() []byte
+}
 type XMLer interface {
 	XML() []byte
 }
@@ -99,13 +115,19 @@ type Session struct {
 
 func main() {
 
-	webserver.RegisterContentTypeInterface("xml", (*XMLer)(nil))
-
+	// Use the simple in-memory session store for sessions
 	store := webserver.NewInMemorySessionStore[Session]()
 
 	ws := webserver.New[Session](store)
+
+	// Tell the webserver how to handle xml content type
+	ws.RegisterContentTypeInterface("xml", (*XMLer)(nil))
+	// Tell the webserver how to handle */* content type
+	ws.RegisterContentTypeInterface("*/*", (*Anythinger)(nil))
+
 	viewCount := uint(0)
 
+	// Describe the root path, which accepts GET and POST methods. They will return an object of type BAR, which implements Htmler, Csver, Jsoner, and Anythinger (but not XML)
 	root := webserver.ApplyRoute(ws, "/", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*BAR, error){
 		webserver.GET: func(req *webserver.Request) (*BAR, error) {
 			b := BAR("LOREMIPSUM")
@@ -116,10 +138,14 @@ func main() {
 			return &b, nil
 		},
 	})
+
+	// Apply a middleware to the root path. Route-level middlewares are a great spot for permission checks, user input validation, etc
 	root.Middleware(func(req *webserver.Request) error {
 		log.Println("THE ROOT PATH HAS BEEN CALLED")
 		return nil
 	})
+
+	// Setup a path at /foo, which accepts GET and PUT methods. They will return an object of type PageViews, which implement Htmler and XML interfaces (not Csver or Jsoner).
 	webserver.ApplyRoute(ws, "/foo", FooBody{}, map[webserver.Verb]func(req *webserver.Request) (*PageViews, error){
 		webserver.GET: func(req *webserver.Request) (*PageViews, error) {
 
@@ -142,6 +168,8 @@ func main() {
 			}, nil
 		},
 	})
+
+	// Set up a basic server-level middleware which logs the time of each request, along with verb (method) and path.
 	ws.Middleware(func(req *webserver.Request) error {
 		log.Println(time.Now(), req.Verb, req.Path)
 		return nil
