@@ -1,13 +1,9 @@
 package webserver
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"io"
 	"log"
-	"mime"
-	"mime/multipart"
 	"net/http"
 	"reflect"
 	"strings"
@@ -82,6 +78,34 @@ func ApplyErrorHandler[T any, S any](s *Server[S], fn func(req *Request, code in
 	// function to be called when an error is returned
 }
 
+func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMap map[string]bool) reflect.Type {
+	// TODO: This is just asking for a panic() to happen...
+	acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
+
+	for _, contentType := range acceptedContentTypes {
+		// is contentTypeInterfaces[contentType] set?
+		if implementsMap[contentType] {
+			return s.contentTypeInterfaces[contentType]
+		} else {
+			parts := strings.Split(contentType, "/")
+			if implementsMap[parts[1]] {
+
+				if parts[1] == "*" {
+					// text/* or similar
+					if implementsMap[parts[0]] {
+						return s.contentTypeInterfaces[parts[0]]
+					}
+				} else {
+					// text/html or similar
+					return s.contentTypeInterfaces[parts[1]]
+
+				}
+			}
+		}
+	}
+	return nil
+}
+
 // You're not able to use generics on a method, so going through a public function which accepts the Server object is the least-bad way to get type safety in the handlers.
 func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers map[Verb]func(req *Request) (T, error)) *Route[B, T] {
 
@@ -101,6 +125,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	s.mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
 
 		req := &Request{
+			req:             r,
 			Path:            r.URL.Path,
 			Headers:         r.Header,
 			Cookies:         r.Cookies(),
@@ -134,128 +159,19 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			return
 		}
 
-		// TODO: This is just asking for a panic() to happen...
-		acceptHeader := r.Header.Get("Accept")
-		acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
-		var responseInterface reflect.Type
-
-		for _, contentType := range acceptedContentTypes {
-			// is contentTypeInterfaces[contentType] set?
-			responseInterface, isset = s.contentTypeInterfaces[contentType]
-			if isset && !implements[contentType] {
-				isset = false
-				responseInterface = nil
-			}
-			if !isset {
-				// split on /, look at second value
-				parts := strings.Split(contentType, "/")
-				responseInterface, isset = s.contentTypeInterfaces[parts[1]]
-				if isset && !implements[parts[1]] {
-					isset = false
-					responseInterface = nil
-				}
-
-				if !isset && parts[1] == "*" {
-					responseInterface, isset = s.contentTypeInterfaces[parts[0]]
-					if isset && !implements[parts[0]] {
-						isset = false
-						responseInterface = nil
-					}
-				}
-			}
-			if responseInterface != nil {
-				break
-
-			}
-		}
+		responseInterface := s.determineResponseInterface(r.Header.Get("Accept"), implements)
 
 		if responseInterface == nil {
 			w.WriteHeader(http.StatusNotAcceptable)
 			return
 		}
 
-		// TODO: determine ahead of time if B implements the required interfaceDoes it implement interface for content type?
 		// TODO: Setup location for uploaded files to go
 		// TODO: Configurable max upload size
-		bodyRdr := bufio.NewReader(r.Body)
-		if _, err := bodyRdr.Peek(1); err == nil {
-			body := new(B)
-
-			mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil {
-				w.WriteHeader(http.StatusBadRequest)
-				log.Println("Error reading request content type:", err)
-				return
-			}
-			switch mediaType {
-			case "application/x-www-form-urlencoded":
-				reqBody, err := io.ReadAll(bodyRdr)
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					log.Println("Error reading request body:", err)
-					return
-				}
-				parser, ok := (interface{}(body)).(FormDataParser)
-				if ok {
-					err := parser.ParseFormData(reqBody)
-					if err != nil {
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-				}
-			case "multipart/form-data":
-				rd := multipart.NewReader(bodyRdr, params["boundary"])
-
-				parser, ok := (interface{}(body)).(MultipartFormDataParser)
-				if ok {
-					err := parser.ParseMultipartFormData(rd)
-					if err != nil {
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-
-				}
-			case "application/json":
-				reqBody, err := io.ReadAll(bodyRdr)
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					log.Println("Error reading request body:", err)
-					return
-				}
-				err = json.Unmarshal(reqBody, body)
-				if err != nil {
-					w.WriteHeader(http.StatusBadRequest)
-					log.Println("Error parsing JSON:", err)
-					return
-				}
-			case "text":
-				reqBody, err := io.ReadAll(bodyRdr)
-				if err != nil {
-					w.WriteHeader(http.StatusInternalServerError)
-					log.Println("Error reading request body:", err)
-					return
-				}
-				parser, ok := (interface{}(body)).(PlainTextParser)
-				if ok {
-					err := parser.ParsePlainText(reqBody)
-					if err != nil {
-						log.Println("Error parsing request body:", err)
-						w.WriteHeader(http.StatusBadRequest)
-						return
-					}
-				}
-
-			default:
-				log.Println(r.Header.Get("Content-Type"))
-
-			}
-			req.Body = *body
-			log.Println("The parsed body is: ", req.Body)
-			//			req.Body = reqBody
-
+		if err := readBody(req, new(B)); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
 		}
-
-		// TODO: File uploads
 
 		for _, mw := range s.middlewares {
 			err := mw(req)
