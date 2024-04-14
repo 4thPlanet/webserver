@@ -15,7 +15,7 @@ type Jsoner interface {
 }
 
 type EventStreamer interface {
-	AsEventStream() []byte
+	AsEventStream() string
 }
 
 var byteSlice = reflect.TypeOf([]byte{})

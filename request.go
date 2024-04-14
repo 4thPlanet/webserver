@@ -21,6 +21,7 @@ type Request struct {
 	Body            interface{} // TODO: generic without breaking Request logic?
 	Context         context.Context
 	ResponseHeaders http.Header
+	ResponseCode    int
 }
 
 func (req *Request) SetCookie(cookie http.Cookie) {

@@ -1,14 +1,22 @@
 package webserver
 
 import (
+	"bytes"
 	"context"
+	"crypto/md5"
+	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"reflect"
 	"strings"
 
 	"github.com/andybalholm/brotli"
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 	"github.com/klauspost/compress/flate"
 	"github.com/klauspost/compress/gzip"
 )
@@ -81,7 +89,6 @@ func ApplyErrorHandler[T any, S any](s *Server[S], fn func(req *Request, code in
 func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMap map[string]bool) reflect.Type {
 	// TODO: This is just asking for a panic() to happen...
 	acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
-
 	for _, contentType := range acceptedContentTypes {
 		// is contentTypeInterfaces[contentType] set?
 		if implementsMap[contentType] {
@@ -89,7 +96,6 @@ func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMa
 		} else {
 			parts := strings.Split(contentType, "/")
 			if implementsMap[parts[1]] {
-
 				if parts[1] == "*" {
 					// text/* or similar
 					if implementsMap[parts[0]] {
@@ -98,7 +104,6 @@ func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMa
 				} else {
 					// text/html or similar
 					return s.contentTypeInterfaces[parts[1]]
-
 				}
 			}
 		}
@@ -116,9 +121,13 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	}
 
 	implements := map[string]bool{}
+	responseType := reflect.TypeOf(new(T)).Elem()
 	for t, i := range s.contentTypeInterfaces {
-		implements[t] = reflect.TypeOf(new(T)).Elem().Implements(i)
+		implements[t] = responseType.Implements(i)
 	}
+
+	rdrInterface := reflect.TypeOf((*io.Reader)(nil)).Elem()
+	isReader := reflect.TypeOf(new(T)).Elem().Implements(rdrInterface)
 
 	// TODO: If T is an interface then check will have to be performed at run-time (maybe it's an Htmler which is also a Csver)..
 
@@ -159,11 +168,91 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			return
 		}
 
+		// TODO: Error if event-stream and not supported on route...
+		if r.Header.Get("Accept") == "text/event-stream" && route.eventStream != nil {
+			if err := readBody(req, new(B)); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			// TODO: Run Middlwares!
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			// should this be r.Context.Done()?
+			events := route.eventStream(req)
+
+			for evt := range events {
+				_, err := fmt.Fprintf(w, "data: %s\n\n", evt.AsEventStream())
+				if err != nil {
+					log.Println("Error sending event:", err, req.Context)
+					break
+				}
+
+				w.(http.Flusher).Flush()
+			}
+
+			return
+		}
+
+		// TODO: Error if upgrade = websocket and not supported on route...
+		// TODO: protocol check
+		if r.Header.Get("Upgrade") == "websocket" && route.websocket != nil {
+			var closedConnectionError = &wsutil.ClosedError{}
+			in := make(chan []byte)
+
+			conn, _, _, err := ws.UpgradeHTTP(r, w)
+
+			if err != nil {
+				// handle error
+				log.Println("Error upgrading websocket connection!", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			ctx, cancel := context.WithCancel(req.Context)
+			req.Context = ctx
+			out := route.websocket(req, in)
+
+			// TODO: Configurable keepalive?
+			go func() {
+				defer func() {
+					close(in)
+					cancel()
+				}()
+
+				for {
+					payload, err := wsutil.ReadClientText(conn)
+					if err != nil {
+						// Only really care if it's not a closed connection error...
+						if !errors.As(err, closedConnectionError) {
+							log.Println("Error reading websocket payload!", err)
+						}
+						return
+					}
+					in <- payload
+				}
+			}()
+
+			for msg := range out {
+				// TODO: Allow for Binary vs Text messages
+				err = wsutil.WriteServerMessage(conn, ws.OpText, msg)
+				if err != nil {
+					log.Println("Error writing message:", err)
+				}
+
+			}
+			return
+		}
+
 		responseInterface := s.determineResponseInterface(r.Header.Get("Accept"), implements)
 
 		if responseInterface == nil {
-			w.WriteHeader(http.StatusNotAcceptable)
-			return
+			// if T implements io.Reader then interface will be that
+			if !isReader {
+				w.WriteHeader(http.StatusNotAcceptable)
+				return
+			}
 		}
 
 		// TODO: Setup location for uploaded files to go
@@ -191,19 +280,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			}
 		}
 
-		// TODO: Special case for text/event-stream (Server-Side Events, T needs to be a channel sending events)
-		if false {
-			go func(ch <-chan EventStreamer) {
-				for evt := range ch {
-					b := evt.AsEventStream()
-					toWrite := append(eventStreamMessagePrefix, b...)
-					toWrite = append(toWrite, '\n')
-					w.Write(toWrite)
-				}
-			}(route.eventStream(req))
-			return
-		}
-
 		// TODO: Special case for websocket connections (Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Key and Sec-WebSocket-Version are set)
 		if false {
 
@@ -215,7 +291,25 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			w.WriteHeader(400)
 			return
 		} else {
-			b := deliverContentAsInterface(response, responseInterface)
+
+			if req.ResponseCode > 0 {
+				w.WriteHeader(req.ResponseCode)
+			}
+
+			var b []byte
+			if responseInterface != nil {
+				b = deliverContentAsInterface(response, responseInterface)
+
+			} else {
+				rdr := (interface{})(response).(io.Reader)
+
+				b, err = io.ReadAll(rdr)
+				if err != nil {
+					w.WriteHeader(500)
+					return
+				}
+
+			}
 
 			var writer io.Writer = w
 
@@ -265,6 +359,66 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 }
 
+func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
+	// Read all subdirectories of dirPath
+	// for each directory found, create route at pathPrefix/directory
+
+	if !strings.HasSuffix(pathPrefix, "/") {
+		pathPrefix += "/"
+	}
+
+	fileHashMap := map[string]string{}
+	_ = fileHashMap
+
+	fs.WalkDir(os.DirFS(dirPath), ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		if path == "." {
+			return nil
+		}
+
+		if strings.Contains(path, "/") {
+			return fs.SkipDir
+		}
+
+		ApplyRoute(s, pathPrefix+path+"/", RequestBody{}, map[Verb]func(req *Request) (*bytes.Buffer, error){
+			GET: func(req *Request) (*bytes.Buffer, error) {
+				hashCheck := req.Headers.Get("If-None-Match")
+				if hashCheck > "" && fileHashMap[req.Path] == hashCheck {
+					// return 304
+					req.ResponseCode = http.StatusNotModified
+					return new(bytes.Buffer), nil
+				}
+
+				b, err := os.ReadFile(dirPath + req.Path)
+				if err != nil {
+					// TODO: Differentiate between error reading the file and file not existing
+					log.Println("Returning error reading file!")
+					return nil, err
+				}
+
+				// Set ETag to md5 of file
+				etag := fmt.Sprintf("%x", md5.Sum(b))
+				fileHashMap[req.Path] = etag
+
+				// Perform a hash check again, in case fileHashMap simply hadn't been initialized..
+				if hashCheck == etag {
+					req.ResponseCode = http.StatusNotModified
+					return new(bytes.Buffer), nil
+				}
+				req.ResponseHeaders.Add("ETag", etag)
+				return bytes.NewBuffer(b), err
+			},
+		})
+
+		return nil
+	})
+
+}
+
+// Starts listening on the server
 func (s *Server[S]) Start(addr string) {
 
 	http.ListenAndServe(addr, s.mux)
