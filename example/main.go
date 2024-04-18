@@ -5,7 +5,6 @@ import (
 	"html/template"
 	"log"
 	"strconv"
-	"sync"
 	"time"
 
 	"encoding/json"
@@ -24,38 +23,50 @@ func init() {
 	}
 }
 
-type BAR string
-
-func (bar *BAR) AsHtml() []byte {
-	// Execute main
-	// Pass in bar as Content
+func injectContentToMainTemplate(subtemplate string, data any) []byte {
 	var buf bytes.Buffer
 	var content bytes.Buffer
 
-	err := tpl.ExecuteTemplate(&content, "bar", bar)
+	err := tpl.ExecuteTemplate(&content, subtemplate, data)
 	if err != nil {
-		log.Println("Error executing bar template: ", err)
+		log.Println("Error executing subtemplate:", err)
 		return nil
 	}
 
-	err = tpl.ExecuteTemplate(&buf, "main", map[string]interface{}{
+	err = tpl.ExecuteTemplate(&buf, "main", map[string]template.HTML{
 		"Content": template.HTML(content.Bytes()),
 	})
 	if err != nil {
 		log.Println("Error executing main template:", err)
 		return nil
 	}
+
 	return buf.Bytes()
+
 }
-func (bar *BAR) AsCsv() []byte {
-	return []byte(fmt.Sprintf("COL1\n%s", *bar))
+
+type HomePage string
+
+func (page *HomePage) AsHtml() []byte {
+	return injectContentToMainTemplate("home", page)
 }
-func (bar *BAR) AsJson() []byte {
-	b, _ := json.Marshal(bar)
+
+func (page *HomePage) AsCsv() []byte {
+	return []byte(`Page,URL
+Page View Counts,/counts
+Server-Sent Event Countdown,/countdown
+Web Socket Echo Server,/echo`)
+}
+
+func (page *HomePage) AsJson() []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"posted_string": *page,
+	})
 	return b
 }
-func (bar *BAR) Anything() []byte {
-	return []byte(fmt.Sprintf("%v", *bar))
+
+func (page *HomePage) Anything() []byte {
+	return []byte(fmt.Sprintf("%v", *page))
 }
 
 // Body which could be used to override Site-Wide PageView count
@@ -75,28 +86,11 @@ func (body *FooBody) ParsePlainText(data []byte) error {
 type PageViews struct {
 	Session uint
 	Total   uint
+	Site    uint
 }
 
 func (pv *PageViews) AsHtml() []byte {
-	// Execute main
-	// Pass in bar as Content
-	var buf bytes.Buffer
-	var content bytes.Buffer
-
-	err := tpl.ExecuteTemplate(&content, "pageviews", pv)
-	if err != nil {
-		log.Println("Error executing bar template: ", err)
-		return nil
-	}
-
-	err = tpl.ExecuteTemplate(&buf, "main", map[string]interface{}{
-		"Content": template.HTML(content.Bytes()),
-	})
-	if err != nil {
-		log.Println("Error executing main template:", err)
-		return nil
-	}
-	return buf.Bytes()
+	return injectContentToMainTemplate("pageviews", pv)
 }
 
 func (pv *PageViews) XML() []byte {
@@ -116,8 +110,18 @@ type Session struct {
 
 type Countdown uint
 
+func (count Countdown) AsHtml() []byte {
+	return injectContentToMainTemplate("countdown", count)
+}
+
 func (count Countdown) AsEventStream() string {
 	return fmt.Sprintf("%d", count)
+}
+
+type Echo struct{}
+
+func (echo *Echo) AsHtml() []byte {
+	return injectContentToMainTemplate("echo", echo)
 }
 
 func main() {
@@ -135,57 +139,73 @@ func main() {
 	// Tell the webserver how to handle */* content type
 	ws.RegisterContentTypeInterface("*/*", (*Anythinger)(nil))
 
-	viewCount := uint(0)
-
-	// Describe the root path, which accepts GET and POST methods. They will return an object of type BAR, which implements Htmler, Csver, Jsoner, and Anythinger (but not XML)
-	root := webserver.ApplyRoute(ws, "/", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*BAR, error){
-		webserver.GET: func(req *webserver.Request) (*BAR, error) {
-			b := BAR("LOREMIPSUM")
-			return &b, nil
+	// Set up the homepage path, which accepts GET and POST methods
+	postedString := HomePage("There have not been any messages posted to the home page yet.")
+	home := webserver.ApplyRoute(ws, "/", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*HomePage, error){
+		webserver.GET: func(req *webserver.Request) (*HomePage, error) {
+			return &postedString, nil
 		},
-		webserver.POST: func(req *webserver.Request) (*BAR, error) {
-			b := BAR("THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG.")
-			return &b, nil
+		webserver.POST: func(req *webserver.Request) (*HomePage, error) {
+			return &postedString, nil
 		},
 	})
+	// Apply a middleware for the root path. Route-level middlewares are a great spot for permission checks, user input validation, etc.
+	home.Middleware(func(req *webserver.Request) error {
+		if req.Body != nil {
+			body := req.Body.(webserver.RequestBody)
+			if posted, isset := body["posted_string"]; isset {
+				postedString = HomePage(posted[0])
+			} else {
+				postedString = "An invalid string was posted!"
+			}
+		}
 
-	// Apply a middleware to the root path. Route-level middlewares are a great spot for permission checks, user input validation, etc
-	root.Middleware(func(req *webserver.Request) error {
-		log.Println("THE ROOT PATH HAS BEEN CALLED")
 		return nil
 	})
 
-	// Setup a path at /foo, which accepts GET and PUT methods. They will return an object of type PageViews, which implement Htmler and XML interfaces (not Csver or Jsoner).
-	webserver.ApplyRoute(ws, "/foo", FooBody{}, map[webserver.Verb]func(req *webserver.Request) (*PageViews, error){
+	// Set up /views, which accepts GET and PUT requests
+	pageCount := uint(0)
+	siteCount := uint(0)
+	views := webserver.ApplyRoute(ws, "/counts", FooBody{}, map[webserver.Verb]func(req *webserver.Request) (*PageViews, error){
 		webserver.GET: func(req *webserver.Request) (*PageViews, error) {
-
-			viewCount++
-			session := req.Session.(*Session)
-			session.Count++
-
 			return &PageViews{
-				Total:   viewCount,
-				Session: session.Count,
+				Total:   pageCount,
+				Session: req.Session.(*Session).Count,
+				Site:    siteCount,
 			}, nil
 
 		},
 		webserver.PUT: func(req *webserver.Request) (*PageViews, error) {
-			viewCount = req.Body.(FooBody).SiteTotal
+			siteCount = req.Body.(FooBody).SiteTotal
 
 			return &PageViews{
-				Total:   viewCount,
+				Total:   pageCount,
 				Session: req.Session.(*Session).Count,
+				Site:    siteCount,
 			}, nil
 		},
 	})
+	ws.Middleware(func(req *webserver.Request) error {
+		// Keep track of total views of all pages on site
+		siteCount++
+		return nil
+	})
+	views.Middleware(func(req *webserver.Request) error {
+		pageCount++
+		session := req.Session.(*Session)
+		session.Count++
+		return nil
+	})
 
-	// Setup a route for server-sent events (SSE). While this route is for SSEs only, you could setup a route to deliver standard content on page load, followed by push-notifications of new data as it becomes available.
-	sse := webserver.ApplyRoute(ws, "/sse", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (interface{}, error){
-		webserver.GET: nil,
+	// Set up /countdown, which accepts GET requests, as well as text/event-stream requests
+	countdown := webserver.ApplyRoute(ws, "/countdown", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (Countdown, error){
+		webserver.GET: func(req *webserver.Request) (Countdown, error) {
+			return 20, nil
+		},
 	})
 
 	// Our SSE will stream a countdown from 20 to 0.
-	sse.EventStream(func(req *webserver.Request) <-chan webserver.EventStreamer {
+	countdown.EventStream(func(req *webserver.Request) <-chan webserver.EventStreamer {
 		count := Countdown(20)
 		ch := make(chan webserver.EventStreamer)
 		go func() {
@@ -206,43 +226,18 @@ func main() {
 		return ch
 	})
 
-	socket := webserver.ApplyRoute(ws, "/websocket", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (interface{}, error){
-		webserver.GET: nil,
+	// Set up /echo, which accepts GET requests, as well as Upgrade: websocket requests
+	echo := webserver.ApplyRoute(ws, "/echo", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (*Echo, error){
+		webserver.GET: func(req *webserver.Request) (*Echo, error) {
+			return &Echo{}, nil
+		},
 	})
-	socket.Websocket(func(req *webserver.Request, inFeed <-chan []byte) <-chan []byte {
-		messages := make(chan []byte, 1)
-		messages <- []byte("Hello from the server!")
-
-		mu := sync.Mutex{}
-		count := 100
+	echo.Websocket(func(req *webserver.Request, inFeed <-chan []byte) <-chan []byte {
+		messages := make(chan []byte)
 		go func() {
 			defer close(messages)
-			for count > 0 {
-				select {
-				case <-req.Context.Done():
-					log.Println("Context has been cancelled, exiting..")
-					return
-				default:
-					messages <- []byte(fmt.Sprintf("%d", count))
-					time.Sleep(time.Second)
-					mu.Lock()
-					count--
-					mu.Unlock()
-				}
-			}
-		}()
-
-		go func() {
 			for in := range inFeed {
-				mu.Lock()
-				c64, err := strconv.ParseInt(string(in), 10, 64)
-				if err != nil {
-					messages <- []byte("Invalid count sent to server!")
-					count = 0
-				} else {
-					count = int(c64)
-				}
-				mu.Unlock()
+				messages <- in
 			}
 		}()
 		return messages

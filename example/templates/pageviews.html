@@ -1,3 +1,5 @@
 {{ define "pageviews" }}
+ <p>This site has had {{ .Site }} total views.</p>
  <p>This page has been viewed {{ .Total }} times, including {{ .Session }} from this session.</p>
+ <p>To chang the site view total, issue a PUT request to this url, with the request body consisting of the new page count.</p>
 {{ end }}

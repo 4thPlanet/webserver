@@ -1,0 +1,15 @@
+{{ define "home" }}
+ <h2>Home Page</h2>
+ <p>Welcome to the demo of the webserver package. Click one of the following links to view an example of the functionality provided:</p>
+ <ul>
+  <li><a href="/counts">Page View Counts</a></li>
+  <li><a href="/countdown">Server-Sent Event Countdown</a></li>
+  <li><a href="/echo">Web Socket Echo Server</a></li>
+ </ul>
+
+ <form method="post">
+  <p>The last string submitted was: {{ . }}</p>
+  <textarea name="posted_string" style="height: 10em; width:100%"></textarea>
+  <input type="submit" value="Submit!" />
+ </form>
+{{ end }}
