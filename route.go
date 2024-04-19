@@ -5,7 +5,7 @@ type Route[B any, T any] struct {
 	middlewares []Middleware
 	websocket   WebsocketHandler
 	eventStream EventStreamHandler
-	handlers    map[Verb]func(req *Request) (T, error)
+	handlers    map[Verb]func(req *Request) (T, *ErrorCode)
 }
 
 func (r *Route[B, T]) Middleware(mw Middleware) {

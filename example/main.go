@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"html/template"
 	"log"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -124,6 +125,25 @@ func (echo *Echo) AsHtml() []byte {
 	return injectContentToMainTemplate("echo", echo)
 }
 
+type ErrorResponse int
+
+func (err *ErrorResponse) AsHtml() []byte {
+	return injectContentToMainTemplate("error", map[string]interface{}{
+		"Code":   *err,
+		"Status": http.StatusText(int(*err)),
+	})
+}
+func (err *ErrorResponse) AsCsv() []byte {
+	return []byte(fmt.Sprintf("Code,Status\n%d,\"%s\"", *err, http.StatusText(int(*err))))
+}
+func (err *ErrorResponse) AsJson() []byte {
+	b, _ := json.Marshal(map[string]interface{}{
+		"code":  *err,
+		"error": http.StatusText(int(*err)),
+	})
+	return b
+}
+
 func main() {
 
 	// Use the simple in-memory session store for sessions
@@ -139,18 +159,23 @@ func main() {
 	// Tell the webserver how to handle */* content type
 	ws.RegisterContentTypeInterface("*/*", (*Anythinger)(nil))
 
+	webserver.ApplyErrorHandler(ws, func(req *webserver.Request, code webserver.ErrorCode) *ErrorResponse {
+		c := ErrorResponse(code)
+		return &c
+	})
+
 	// Set up the homepage path, which accepts GET and POST methods
 	postedString := HomePage("There have not been any messages posted to the home page yet.")
-	home := webserver.ApplyRoute(ws, "/", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*HomePage, error){
-		webserver.GET: func(req *webserver.Request) (*HomePage, error) {
+	home := webserver.ApplyRoute(ws, "/", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*HomePage, *webserver.ErrorCode){
+		webserver.GET: func(req *webserver.Request) (*HomePage, *webserver.ErrorCode) {
 			return &postedString, nil
 		},
-		webserver.POST: func(req *webserver.Request) (*HomePage, error) {
+		webserver.POST: func(req *webserver.Request) (*HomePage, *webserver.ErrorCode) {
 			return &postedString, nil
 		},
 	})
 	// Apply a middleware for the root path. Route-level middlewares are a great spot for permission checks, user input validation, etc.
-	home.Middleware(func(req *webserver.Request) error {
+	home.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		if req.Body != nil {
 			body := req.Body.(webserver.RequestBody)
 			if posted, isset := body["posted_string"]; isset {
@@ -166,8 +191,8 @@ func main() {
 	// Set up /views, which accepts GET and PUT requests
 	pageCount := uint(0)
 	siteCount := uint(0)
-	views := webserver.ApplyRoute(ws, "/counts", FooBody{}, map[webserver.Verb]func(req *webserver.Request) (*PageViews, error){
-		webserver.GET: func(req *webserver.Request) (*PageViews, error) {
+	views := webserver.ApplyRoute(ws, "/counts", FooBody{}, map[webserver.Verb]func(req *webserver.Request) (*PageViews, *webserver.ErrorCode){
+		webserver.GET: func(req *webserver.Request) (*PageViews, *webserver.ErrorCode) {
 			return &PageViews{
 				Total:   pageCount,
 				Session: req.Session.(*Session).Count,
@@ -175,7 +200,7 @@ func main() {
 			}, nil
 
 		},
-		webserver.PUT: func(req *webserver.Request) (*PageViews, error) {
+		webserver.PUT: func(req *webserver.Request) (*PageViews, *webserver.ErrorCode) {
 			siteCount = req.Body.(FooBody).SiteTotal
 
 			return &PageViews{
@@ -185,12 +210,12 @@ func main() {
 			}, nil
 		},
 	})
-	ws.Middleware(func(req *webserver.Request) error {
+	ws.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		// Keep track of total views of all pages on site
 		siteCount++
 		return nil
 	})
-	views.Middleware(func(req *webserver.Request) error {
+	views.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		pageCount++
 		session := req.Session.(*Session)
 		session.Count++
@@ -198,8 +223,8 @@ func main() {
 	})
 
 	// Set up /countdown, which accepts GET requests, as well as text/event-stream requests
-	countdown := webserver.ApplyRoute(ws, "/countdown", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (Countdown, error){
-		webserver.GET: func(req *webserver.Request) (Countdown, error) {
+	countdown := webserver.ApplyRoute(ws, "/countdown", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (Countdown, *webserver.ErrorCode){
+		webserver.GET: func(req *webserver.Request) (Countdown, *webserver.ErrorCode) {
 			return 20, nil
 		},
 	})
@@ -227,8 +252,8 @@ func main() {
 	})
 
 	// Set up /echo, which accepts GET requests, as well as Upgrade: websocket requests
-	echo := webserver.ApplyRoute(ws, "/echo", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (*Echo, error){
-		webserver.GET: func(req *webserver.Request) (*Echo, error) {
+	echo := webserver.ApplyRoute(ws, "/echo", map[string]interface{}{}, map[webserver.Verb]func(req *webserver.Request) (*Echo, *webserver.ErrorCode){
+		webserver.GET: func(req *webserver.Request) (*Echo, *webserver.ErrorCode) {
 			return &Echo{}, nil
 		},
 	})
@@ -244,7 +269,7 @@ func main() {
 	})
 
 	// Set up a basic server-level middleware which logs the time of each request, along with verb (method) and path.
-	ws.Middleware(func(req *webserver.Request) error {
+	ws.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		log.Println(time.Now(), req.Verb, req.Path)
 		return nil
 	})
