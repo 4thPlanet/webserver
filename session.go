@@ -50,13 +50,13 @@ func (store *InMemorySessionStore[T]) ParseToken(header http.Header) string {
 	}
 }
 func (store *InMemorySessionStore[T]) Get(token string) (interface{}, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 	return store.Sessions[token], nil
 }
 func (store *InMemorySessionStore[T]) Save(token string, data interface{}) error {
-	store.mu.RLock()
-	defer store.mu.RUnlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 	store.Sessions[token] = data.(T)
 	return nil
 }
@@ -66,6 +66,16 @@ func (store InMemorySessionStore[T]) Delete(token string) error {
 	delete(store.Sessions, token)
 	return nil
 }
+
+// Sessionless is a placeholder for anyone who wants to run a sessionless-server
+type Sessionless struct{}
+
+func (_ Sessionless) ParseToken(header http.Header) string {
+	return ""
+}
+func (_ Sessionless) Get(token string) (interface{}, error)     { return nil, nil }
+func (_ Sessionless) Save(token string, data interface{}) error { return nil }
+func (_ Sessionless) Delete(token string) error                 { return nil }
 
 type Session[T any] struct {
 	Token string
@@ -81,19 +91,31 @@ func (session *Session[T]) load(ctx context.Context) error {
 		return err
 	}
 
-	sd := data.(T)
-	session.Data = &sd
+	if data != nil {
+		sd := data.(T)
+		session.Data = &sd
+	} else {
+		session.Data = nil
+	}
+
 	return nil
 }
 
 func (session *Session[T]) save(ctx context.Context) error {
 	// TODO: Set cookie
-	session.store.Save(session.Token, *session.Data)
-	session.req.SetCookie(http.Cookie{
-		Name:   "session_token",
-		Value:  session.Token,
-		MaxAge: (24 * 60 * 60),
-	})
+	if session.Data == nil {
+		session.store.Save(session.Token, nil)
+	} else {
+		session.store.Save(session.Token, *session.Data)
+	}
+	if session.Token > "" {
+		session.req.SetCookie(http.Cookie{
+			Name:   "session_token",
+			Value:  session.Token,
+			MaxAge: (24 * 60 * 60),
+		})
+	}
+
 	return nil
 }
 

@@ -127,7 +127,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	// TODO: If T is an interface then check will have to be performed at run-time (maybe it's an Htmler which is also a Csver)..
 
 	s.mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
-
 		req := &Request{
 			req:             r,
 			Path:            r.URL.Path,
@@ -314,7 +313,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			writeWithContentEncoding(b, r.Header.Get("Accept-Encoding"), w)
 
 		}
-
 	})
 
 	return route
@@ -322,6 +320,9 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 }
 
 func writeWithContentEncoding(content []byte, acceptEncodingHeader string, w http.ResponseWriter) {
+	if len(content) == 0 {
+		return
+	}
 	var writer io.Writer = w
 
 	encodings := strings.Split(acceptEncodingHeader, ",")
@@ -357,6 +358,7 @@ ENCODINGLOOP:
 	if err != nil {
 		log.Println("Error writing content:", err)
 	}
+
 }
 
 func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
