@@ -84,10 +84,17 @@ func (s *Server[S]) Middleware(mw Middleware) {
 }
 
 func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMap map[string]bool) reflect.Type {
-	// TODO: This is just asking for a panic() to happen...
+
 	if len(acceptHeader) == 0 {
 		return nil
 	}
+
+	// TODO: Properly separate header values.
+	// Content types are separated by a comma (,)
+	// with priority set following a semicolon (;)
+	// If no semicolon, priority = 1
+	// sort on priority, first header takes priority
+
 	acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
 	for _, contentType := range acceptedContentTypes {
 		// is contentTypeInterfaces[contentType] set?
@@ -95,14 +102,17 @@ func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMa
 			return s.contentTypeInterfaces[contentType]
 		} else {
 			parts := strings.Split(contentType, "/")
-			if implementsMap[parts[1]] {
-				if parts[1] == "*" {
-					// text/* or similar
-					if implementsMap[parts[0]] {
-						return s.contentTypeInterfaces[parts[0]]
-					}
-				} else {
-					// text/html or similar
+			if len(parts) == 1 {
+				continue
+			}
+
+			if parts[1] == "*" {
+				// text/* or similar - need to match on parts[0]
+				if implementsMap[parts[0]] {
+					return s.contentTypeInterfaces[parts[0]]
+				}
+			} else {
+				if implementsMap[parts[1]] {
 					return s.contentTypeInterfaces[parts[1]]
 				}
 			}

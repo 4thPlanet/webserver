@@ -5,9 +5,44 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+type TestXmler interface {
+	AsXml() []byte
+}
+type TestTexter interface {
+	Text() []byte
+}
+
+func TestDetermineResponseInterface(t *testing.T) {
+	server := New[Sessionless](nil)
+	server.RegisterContentTypeInterface("text/xml", (*TestXmler)(nil))
+	server.RegisterContentTypeInterface("text", (*TestTexter)(nil))
+
+	for _, test := range []struct {
+		header        string
+		implementsMap map[string]bool
+		expected      reflect.Type
+	}{
+		{"", map[string]bool{}, nil},
+		{"text/xml", map[string]bool{"text/xml": true}, reflect.TypeOf((*TestXmler)(nil)).Elem()},
+		{"text/html", map[string]bool{"text/csv": true}, nil},
+		{"text/html", map[string]bool{"html": true}, reflect.TypeOf((*Htmler)(nil)).Elem()},
+		{"text/*", map[string]bool{"text": true}, reflect.TypeOf((*TestTexter)(nil)).Elem()},
+		{"DONTPANIC", map[string]bool{"text/xml": true}, nil},
+	} {
+
+		responseType := server.determineResponseInterface(test.header, test.implementsMap)
+		if !reflect.DeepEqual(responseType, test.expected) {
+			t.Errorf("Did not return expected type [%v] with header [%s] and implementsMap [%v]\n\tReturned: %v", test.expected, test.header, test.implementsMap, responseType)
+		}
+
+	}
+
+}
 
 func BenchmarkServer(b *testing.B) {
 	message := `Hello, World!`
