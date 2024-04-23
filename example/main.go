@@ -274,5 +274,9 @@ func main() {
 		return nil
 	})
 	log.Println("Starting server...")
-	ws.Start("localhost:8080")
+	_, _, err := ws.Start("localhost:8080")
+	if err != nil {
+		log.Fatal("Error starting server: ", err)
+	}
+	<-make(chan struct{})
 }

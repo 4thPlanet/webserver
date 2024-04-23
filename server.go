@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -84,6 +85,9 @@ func (s *Server[S]) Middleware(mw Middleware) {
 
 func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMap map[string]bool) reflect.Type {
 	// TODO: This is just asking for a panic() to happen...
+	if len(acceptHeader) == 0 {
+		return nil
+	}
 	acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
 	for _, contentType := range acceptedContentTypes {
 		// is contentTypeInterfaces[contentType] set?
@@ -259,7 +263,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		for _, mw := range s.middlewares {
 			errorCode := mw(req)
 			if errorCode != nil {
-				// TODO: Make this a meaningful error...
 				s.errorHandler.Apply(req, *errorCode, w)
 				return
 			}
@@ -268,7 +271,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		for _, mw := range route.middlewares {
 			errorCode := mw(req)
 			if errorCode != nil {
-				// TODO: Make this a meaningful error...
 				s.errorHandler.Apply(req, *errorCode, w)
 				return
 			}
@@ -277,7 +279,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		response, errorCode := handler(req)
 
 		if errorCode != nil {
-			// TODO: Make this a meaningful error
 			log.Println("The error was: ", *errorCode)
 			s.errorHandler.Apply(req, *errorCode, w)
 			return
@@ -427,7 +428,32 @@ func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
 }
 
 // Starts listening on the server
-func (s *Server[S]) Start(addr string) {
+// Returns host and port used (in case 0 is returned), or error if there is one
+func (s *Server[S]) Start(addr string) (string, uint, error) {
 
-	http.ListenAndServe(addr, s.mux)
+	// Listen on the specified address.
+	// TODO: Add support for TLS/HTTPS
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return "", 0, err
+	}
+
+	addrParts := strings.Split(l.Addr().String(), ":")
+
+	go func() {
+		defer l.Close()
+		server := http.Server{
+			Handler: s.mux,
+		}
+		server.Serve(l)
+	}()
+
+	// parse the port to a uint
+	var port uint
+	for _, r := range addrParts[1] {
+		port = (port * 10) + uint(r-'0')
+	}
+
+	return addrParts[0], port, nil
+
 }
