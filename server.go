@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"reflect"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/andybalholm/brotli"
@@ -89,15 +91,48 @@ func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMa
 		return nil
 	}
 
-	// TODO: Properly separate header values.
-	// Content types are separated by a comma (,)
-	// with priority set following a semicolon (;)
-	// If no semicolon, priority = 1
-	// sort on priority, first header takes priority
+	offers := []string{}
+	for contentType, implements := range implementsMap {
+		if implements {
+			if strings.Contains(contentType, "/") {
+				offers = append(offers, contentType)
+			} else {
+				offers = append(offers, "text/"+contentType)
+			}
 
-	acceptedContentTypes := strings.Split(strings.Split(acceptHeader, ";")[0], ",")
-	for _, contentType := range acceptedContentTypes {
+		}
+	}
+
+	type acceptedContentType struct {
+		contentType string
+		weight      float64
+	}
+
+	acceptHeaderSplit := strings.Split(acceptHeader, ",")
+
+	acceptedContentTypes := make([]acceptedContentType, len(acceptHeaderSplit))
+	for idx, contentType := range acceptHeaderSplit {
+
+		acceptedParts := strings.Split(contentType, ";q=")
+		acceptedType := acceptedContentType{contentType: acceptedParts[0], weight: 1.0}
+		if len(acceptedParts) > 1 {
+			weight, err := strconv.ParseFloat(acceptedParts[1], 64)
+			if err != nil {
+				log.Println("Error parsing weight value:", err)
+				continue
+			}
+			acceptedType.weight = weight
+		}
+		acceptedContentTypes[idx] = acceptedType
+	}
+
+	sort.Slice(acceptedContentTypes, func(i, j int) bool {
+		return acceptedContentTypes[i].weight > acceptedContentTypes[j].weight
+	})
+
+	for _, contentTypeEntry := range acceptedContentTypes {
 		// is contentTypeInterfaces[contentType] set?
+		contentType := contentTypeEntry.contentType
 		if implementsMap[contentType] {
 			return s.contentTypeInterfaces[contentType]
 		} else {
