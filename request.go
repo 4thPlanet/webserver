@@ -9,29 +9,48 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"time"
 )
 
 type Request struct {
-	req             *http.Request
-	Session         interface{}
-	Verb            Verb
-	Path            string
-	Headers         http.Header
-	Cookies         []*http.Cookie
+	req       *http.Request
+	startTime time.Time
+
+	Session interface{}
+	Verb    Verb
+	Path    string
+	Headers http.Header
+	Cookies []*http.Cookie
+
 	Body            interface{} // TODO: generic without breaking Request logic?
 	Context         context.Context
 	ResponseHeaders http.Header
 	ResponseCode    int
+	bodySize        uint
+	responseSize    uint
+}
+
+func (req *Request) Start() time.Time {
+	return req.startTime
 }
 
 func (req *Request) SetCookie(cookie http.Cookie) {
 	req.ResponseHeaders.Set("set-cookie", cookie.String())
 }
 
+func (req *Request) BodySize() uint {
+	return req.bodySize
+}
+
+func (req *Request) ResponseSize() uint {
+	return req.responseSize
+}
+
 // TODO: determine ahead of time if B implements the required interfaceDoes it implement interface for content type?
 // TODO: Setup location for uploaded files to go
 // TODO: Configurable max upload size
 // TODO: File Uploads
+// TODO: Multipart/Form-Data needs methodology to get request body size
 func readBody[B any](req *Request, body *B) error {
 	bodyRdr := bufio.NewReader(req.req.Body)
 	if _, err := bodyRdr.Peek(1); err == nil {
@@ -47,6 +66,7 @@ func readBody[B any](req *Request, body *B) error {
 				return err
 				//				w.WriteHeader(http.StatusInternalServerError)
 			}
+			req.bodySize = uint(len(reqBody))
 			parser, ok := (interface{}(body)).(FormDataParser)
 			if ok {
 				err := parser.ParseFormData(reqBody)
@@ -57,7 +77,6 @@ func readBody[B any](req *Request, body *B) error {
 			}
 		case "multipart/form-data":
 			rd := multipart.NewReader(bodyRdr, params["boundary"])
-
 			parser, ok := (interface{}(body)).(MultipartFormDataParser)
 			if ok {
 				err := parser.ParseMultipartFormData(rd)
@@ -73,6 +92,7 @@ func readBody[B any](req *Request, body *B) error {
 				return err
 				//				w.WriteHeader(http.StatusInternalServerError)
 			}
+			req.bodySize = uint(len(reqBody))
 			err = json.Unmarshal(reqBody, body)
 			if err != nil {
 				return err
@@ -84,6 +104,7 @@ func readBody[B any](req *Request, body *B) error {
 				return err
 				//				w.WriteHeader(http.StatusInternalServerError)
 			}
+			req.bodySize = uint(len(reqBody))
 			parser, ok := (interface{}(body)).(PlainTextParser)
 			if ok {
 				err := parser.ParsePlainText(reqBody)

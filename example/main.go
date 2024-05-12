@@ -210,11 +210,6 @@ func main() {
 			}, nil
 		},
 	})
-	ws.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
-		// Keep track of total views of all pages on site
-		siteCount++
-		return nil
-	})
 	views.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		pageCount++
 		session := req.Session.(*Session)
@@ -270,9 +265,11 @@ func main() {
 
 	// Set up a basic server-level middleware which logs the time of each request, along with verb (method) and path.
 	ws.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
-		log.Println(time.Now(), req.Verb, req.Path)
+		// Keep track of total views of all pages on site
+		siteCount++
 		return nil
 	})
+
 	log.Println("Starting server...")
 	_, _, err := ws.Start("localhost:8080")
 	if err != nil {

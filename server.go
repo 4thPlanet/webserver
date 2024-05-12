@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/andybalholm/brotli"
 	"github.com/gobwas/ws"
@@ -28,6 +29,7 @@ import (
 var rdrInterface = reflect.TypeOf((*io.Reader)(nil)).Elem()
 
 type Server[S any] struct {
+	Logger                defaultLogger
 	sessionStore          SessionStore
 	middlewares           []Middleware
 	contentTypeInterfaces map[string]reflect.Type
@@ -41,6 +43,7 @@ type EventStreamHandler func(req *Request) <-chan EventStreamer
 
 func New[S any](sessionStore SessionStore) *Server[S] {
 	s := &Server[S]{
+		Logger:                DefaultLogger,
 		middlewares:           make([]Middleware, 0),
 		sessionStore:          sessionStore,
 		contentTypeInterfaces: make(map[string]reflect.Type),
@@ -178,6 +181,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	s.mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
 		req := &Request{
 			req:             r,
+			startTime:       time.Now(),
 			Path:            r.URL.Path,
 			Headers:         r.Header,
 			Cookies:         r.Cookies(),
@@ -192,7 +196,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		err := session.load(context.TODO())
 
 		if err != nil {
-			log.Println("Error loading session:", err)
+			s.Logger.LogError(req, fmt.Errorf("Error loading session: %v", err))
 		}
 		req.Session = session.Data
 
@@ -229,7 +233,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			for evt := range events {
 				_, err := fmt.Fprintf(w, "data: %s\n\n", evt.AsEventStream())
 				if err != nil {
-					log.Println("Error sending event:", err, req.Context)
+					s.Logger.LogError(req, fmt.Errorf("Error sending event: %v", err))
 					break
 				}
 
@@ -249,7 +253,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 			if err != nil {
 				// handle error
-				log.Println("Error upgrading websocket connection!", err)
+				s.Logger.LogError(req, fmt.Errorf("Error upgrading websocket connection! %v", err))
 				s.errorHandler.Apply(req, http.StatusInternalServerError, w)
 				return
 			}
@@ -269,7 +273,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 					if err != nil {
 						// Only really care if it's not a closed connection error...
 						if !errors.As(err, closedConnectionError) {
-							log.Println("Error reading websocket payload!", err)
+							s.Logger.LogError(req, fmt.Errorf("Error reading websocket payload! %v", err))
 						}
 						return
 					}
@@ -281,7 +285,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 				// TODO: Allow for Binary vs Text messages
 				err = wsutil.WriteServerMessage(conn, ws.OpText, msg)
 				if err != nil {
-					log.Println("Error writing message:", err)
+					s.Logger.LogError(req, fmt.Errorf("Error writing message: %v", err))
 				}
 
 			}
@@ -324,13 +328,14 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		response, errorCode := handler(req)
 
 		if errorCode != nil {
-			log.Println("The error was: ", *errorCode)
 			s.errorHandler.Apply(req, *errorCode, w)
 			return
 		} else {
 
 			if req.ResponseCode > 0 {
 				w.WriteHeader(req.ResponseCode)
+			} else {
+				req.ResponseCode = 200
 			}
 
 			var b []byte
@@ -342,7 +347,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 				b, err = io.ReadAll(rdr)
 				if err != nil {
-					log.Println("Error reading from Reader: ", err)
+					s.Logger.LogError(req, fmt.Errorf("Error reading from Reader: %v", err))
 					s.errorHandler.Apply(req, http.StatusInternalServerError, w)
 					return
 				}
@@ -353,11 +358,15 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			err := session.save(context.TODO())
 
 			if err != nil {
-				log.Println("Error saving session:", err)
+				s.Logger.LogError(req, fmt.Errorf("Error saving session: %v", err))
 			}
 
-			writeWithContentEncoding(b, r.Header.Get("Accept-Encoding"), w)
-
+			req.responseSize = uint(len(b))
+			err = writeWithContentEncoding(b, r.Header.Get("Accept-Encoding"), w)
+			if err != nil {
+				s.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", err))
+			}
+			s.Logger.LogRequest(req)
 		}
 	})
 
@@ -365,9 +374,9 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 }
 
-func writeWithContentEncoding(content []byte, acceptEncodingHeader string, w http.ResponseWriter) {
+func writeWithContentEncoding(content []byte, acceptEncodingHeader string, w http.ResponseWriter) error {
 	if len(content) == 0 {
-		return
+		return nil
 	}
 	var writer io.Writer = w
 
@@ -401,10 +410,7 @@ ENCODINGLOOP:
 		}
 	}
 	_, err := writer.Write(content)
-	if err != nil {
-		log.Println("Error writing content:", err)
-	}
-
+	return err
 }
 
 func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
@@ -444,7 +450,7 @@ func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
 				if err != nil {
 					var internalServerError ErrorCode
 					if errors.Is(err, os.ErrNotExist) {
-						log.Println("FILE NOT FOUND!!")
+						s.Logger.LogError(req, fmt.Errorf("FILE NOT FOUND!!"))
 						internalServerError = ErrorCode(http.StatusNotFound)
 					} else {
 						internalServerError = ErrorCode(http.StatusInternalServerError)

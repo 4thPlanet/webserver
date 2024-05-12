@@ -1,6 +1,7 @@
 package webserver
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -43,7 +44,13 @@ func (err *errorHandler[S]) Apply(req *Request, statusCode ErrorCode, w http.Res
 				return
 			}
 		}
-		writeWithContentEncoding(buf, req.Headers.Get("Accept-Encoding"), w)
+		req.responseSize = uint(len(buf))
+		e := writeWithContentEncoding(buf, req.Headers.Get("Accept-Encoding"), w)
+		if e != nil {
+			err.server.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", e))
+		}
+		err.server.Logger.LogRequest(req)
+
 	}
 }
 
