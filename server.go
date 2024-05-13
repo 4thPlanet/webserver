@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ var rdrInterface = reflect.TypeOf((*io.Reader)(nil)).Elem()
 
 type Server[S any] struct {
 	Logger                defaultLogger
+	SecureConfig          *tls.Config
 	sessionStore          SessionStore
 	middlewares           []Middleware
 	contentTypeInterfaces map[string]reflect.Type
@@ -483,10 +485,13 @@ func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
 func (s *Server[S]) Start(addr string) (string, uint, error) {
 
 	// Listen on the specified address.
-	// TODO: Add support for TLS/HTTPS
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return "", 0, err
+	}
+
+	if s.SecureConfig != nil {
+		l = tls.NewListener(l, s.SecureConfig)
 	}
 
 	addrParts := strings.Split(l.Addr().String(), ":")

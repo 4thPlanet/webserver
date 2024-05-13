@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"html/template"
 	"log"
 	"net/http"
@@ -12,6 +13,12 @@ import (
 	"fmt"
 
 	"github.com/4thPlanet/webserver"
+)
+
+// If you'd like to use TLS, set the paths of the certificate and private key files
+const (
+	serverCertFile string = ""
+	serverKeyFile  string = ""
 )
 
 var tpl *template.Template
@@ -150,6 +157,14 @@ func main() {
 	store := webserver.NewInMemorySessionStore[Session]()
 
 	ws := webserver.New[Session](store)
+
+	if serverCertFile > "" && serverKeyFile > "" {
+		certificate, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
+		if err != nil {
+			log.Fatal("Unable to load cert files: ", err)
+		}
+		ws.SecureConfig = &tls.Config{Certificates: []tls.Certificate{certificate}}
+	}
 
 	// static assets (JS/CSS/images)
 	ws.PublicRoute("./public", "/")
