@@ -197,6 +197,25 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 		err := session.load(context.TODO())
 
+		runMiddlewares := func() *ErrorCode {
+			for _, mw := range s.middlewares {
+				errorCode := mw(req)
+				if errorCode != nil {
+					s.errorHandler.Apply(req, *errorCode, w)
+					return errorCode
+				}
+			}
+
+			for _, mw := range route.middlewares {
+				errorCode := mw(req)
+				if errorCode != nil {
+					s.errorHandler.Apply(req, *errorCode, w)
+					return errorCode
+				}
+			}
+			return nil
+		}
+
 		if err != nil {
 			s.Logger.LogError(req, fmt.Errorf("Error loading session: %v", err))
 		}
@@ -224,7 +243,11 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 				return
 			}
 
-			// TODO: Run Middlwares!
+			errorCode := runMiddlewares()
+			if errorCode != nil {
+				s.errorHandler.Apply(req, *errorCode, w)
+				return
+			}
 
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
@@ -248,6 +271,13 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		// TODO: Error if upgrade = websocket and not supported on route...
 		// TODO: protocol check
 		if r.Header.Get("Upgrade") == "websocket" && route.websocket != nil {
+
+			errorCode := runMiddlewares()
+			if errorCode != nil {
+				s.errorHandler.Apply(req, *errorCode, w)
+				return
+			}
+
 			var closedConnectionError = &wsutil.ClosedError{}
 			in := make(chan []byte)
 
@@ -311,20 +341,10 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			return
 		}
 
-		for _, mw := range s.middlewares {
-			errorCode := mw(req)
-			if errorCode != nil {
-				s.errorHandler.Apply(req, *errorCode, w)
-				return
-			}
-		}
-
-		for _, mw := range route.middlewares {
-			errorCode := mw(req)
-			if errorCode != nil {
-				s.errorHandler.Apply(req, *errorCode, w)
-				return
-			}
+		errorCode := runMiddlewares()
+		if errorCode != nil {
+			s.errorHandler.Apply(req, *errorCode, w)
+			return
 		}
 
 		response, errorCode := handler(req)

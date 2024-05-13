@@ -102,7 +102,6 @@ func (session *Session[T]) load(ctx context.Context) error {
 }
 
 func (session *Session[T]) save(ctx context.Context) error {
-	// TODO: Set cookie
 	if session.Data == nil {
 		session.store.Save(session.Token, nil)
 	} else {
@@ -127,6 +126,5 @@ func (session *Session[T]) delete(ctx context.Context) error {
 		MaxAge: -1,
 	})
 	session.Data = nil
-	// TODO: Set expiration cookie
 	return nil
 }
