@@ -373,7 +373,6 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 					s.errorHandler.Apply(req, http.StatusInternalServerError, w)
 					return
 				}
-
 			}
 
 			session.Data = req.Session.(*S)
@@ -388,6 +387,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			if err != nil {
 				s.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", err))
 			}
+
 			s.Logger.LogRequest(req)
 		}
 	})

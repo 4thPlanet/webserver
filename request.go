@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"mime"
-	"mime/multipart"
 	"net/http"
 	"time"
 )
@@ -46,13 +45,26 @@ func (req *Request) ResponseSize() uint {
 	return req.responseSize
 }
 
+type bodySizeReader struct {
+	Size int
+}
+
+func (rdr *bodySizeReader) Write(buf []byte) (n int, err error) {
+	rdr.Size += len(buf)
+	return len(buf), nil
+}
+
 // TODO: determine ahead of time if B implements the required interfaceDoes it implement interface for content type?
-// TODO: Setup location for uploaded files to go
 // TODO: Configurable max upload size
-// TODO: File Uploads
-// TODO: Multipart/Form-Data needs methodology to get request body size
 func readBody[B any](req *Request, body *B) error {
-	bodyRdr := bufio.NewReader(req.req.Body)
+	sizer := new(bodySizeReader)
+	defer func() {
+		req.bodySize = uint(sizer.Size)
+	}()
+
+	teeBody := io.TeeReader(req.req.Body, sizer)
+	bodyRdr := bufio.NewReader(teeBody)
+
 	if _, err := bodyRdr.Peek(1); err == nil {
 		mediaType, params, err := mime.ParseMediaType(req.Headers.Get("Content-Type"))
 		if err != nil {
@@ -61,25 +73,18 @@ func readBody[B any](req *Request, body *B) error {
 		}
 		switch mediaType {
 		case "application/x-www-form-urlencoded":
-			reqBody, err := io.ReadAll(bodyRdr)
-			if err != nil {
-				return err
-				//				w.WriteHeader(http.StatusInternalServerError)
-			}
-			req.bodySize = uint(len(reqBody))
 			parser, ok := (interface{}(body)).(FormDataParser)
 			if ok {
-				err := parser.ParseFormData(reqBody)
+				err := parser.ParseFormData(bodyRdr)
 				if err != nil {
 					return err
 					//					w.WriteHeader(http.StatusBadRequest)
 				}
 			}
 		case "multipart/form-data":
-			rd := multipart.NewReader(bodyRdr, params["boundary"])
 			parser, ok := (interface{}(body)).(MultipartFormDataParser)
 			if ok {
-				err := parser.ParseMultipartFormData(rd)
+				err := parser.ParseMultipartFormData(bodyRdr, params["boundary"])
 				if err != nil {
 					return err
 					//			w.WriteHeader(http.StatusBadRequest)
@@ -92,22 +97,15 @@ func readBody[B any](req *Request, body *B) error {
 				return err
 				//				w.WriteHeader(http.StatusInternalServerError)
 			}
-			req.bodySize = uint(len(reqBody))
 			err = json.Unmarshal(reqBody, body)
 			if err != nil {
 				return err
 				//				w.WriteHeader(http.StatusBadRequest)
 			}
 		case "text":
-			reqBody, err := io.ReadAll(bodyRdr)
-			if err != nil {
-				return err
-				//				w.WriteHeader(http.StatusInternalServerError)
-			}
-			req.bodySize = uint(len(reqBody))
 			parser, ok := (interface{}(body)).(PlainTextParser)
 			if ok {
-				err := parser.ParsePlainText(reqBody)
+				err := parser.ParsePlainText(bodyRdr)
 				if err != nil {
 					return err
 					//			w.WriteHeader(http.StatusBadRequest)

@@ -1,0 +1,14 @@
+{{ define "upload" }}
+ <p>This page will show off a basic file upload form and processing functionality.</p>
+ {{ if .FileSize }}
+ <p>The uploaded file was {{ .FileSize }} bytes large.</p>
+ {{ end }}
+ <form method="post" enctype="multipart/form-data">
+  <p>
+   <label for="file-upload">File to Upload:</label>
+   <input id="file-upload" name="some-file" type="file" />
+  </p>
+  <button type="submit">Submit!</button>
+ </form>
+
+{{ end }}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -82,7 +83,11 @@ type FooBody struct {
 	SiteTotal uint
 }
 
-func (body *FooBody) ParsePlainText(data []byte) error {
+func (body *FooBody) ParsePlainText(rdr io.Reader) error {
+	data, err := io.ReadAll(rdr)
+	if err != nil {
+		return err
+	}
 	override, err := strconv.ParseUint(string(data), 10, 64)
 	if err != nil {
 		return err
@@ -130,6 +135,14 @@ type Echo struct{}
 
 func (echo *Echo) AsHtml() []byte {
 	return injectContentToMainTemplate("echo", echo)
+}
+
+type Upload struct {
+	FileSize int64
+}
+
+func (upload *Upload) AsHtml() []byte {
+	return injectContentToMainTemplate("upload", upload)
 }
 
 type ErrorResponse int
@@ -193,7 +206,7 @@ func main() {
 	home.Middleware(func(req *webserver.Request) *webserver.ErrorCode {
 		if req.Body != nil {
 			body := req.Body.(webserver.RequestBody)
-			if posted, isset := body["posted_string"]; isset {
+			if posted, isset := body.Values["posted_string"]; isset {
 				postedString = HomePage(posted[0])
 			} else {
 				postedString = "An invalid string was posted!"
@@ -276,6 +289,25 @@ func main() {
 			}
 		}()
 		return messages
+	})
+
+	webserver.ApplyRoute(ws, "/upload", webserver.RequestBody{}, map[webserver.Verb]func(req *webserver.Request) (*Upload, *webserver.ErrorCode){
+		webserver.POST: func(req *webserver.Request) (*Upload, *webserver.ErrorCode) {
+			// A file was uploaded!
+			requestBody := req.Body.(webserver.RequestBody)
+			uploaded := requestBody.Files["some-file"]
+			size, err := io.Copy(io.Discard, uploaded[0])
+			if err != nil {
+				ws.Logger.LogError(req, err)
+			}
+
+			return &Upload{
+				FileSize: size,
+			}, nil
+		},
+		webserver.GET: func(req *webserver.Request) (*Upload, *webserver.ErrorCode) {
+			return &Upload{}, nil
+		},
 	})
 
 	// Set up a basic server-level middleware which logs the time of each request, along with verb (method) and path.
