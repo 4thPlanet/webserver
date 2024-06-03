@@ -32,6 +32,7 @@ var rdrInterface = reflect.TypeOf((*io.Reader)(nil)).Elem()
 type Server[S any] struct {
 	Logger                defaultLogger
 	SecureConfig          *tls.Config
+	MaxPostSize           uint
 	sessionStore          SessionStore
 	middlewares           []Middleware
 	contentTypeInterfaces map[string]reflect.Type
@@ -46,6 +47,7 @@ type EventStreamHandler func(req *Request) <-chan EventStreamer
 func New[S any](sessionStore SessionStore) *Server[S] {
 	s := &Server[S]{
 		Logger:                DefaultLogger,
+		MaxPostSize:           10 << 20, // 10MB
 		middlewares:           make([]Middleware, 0),
 		sessionStore:          sessionStore,
 		contentTypeInterfaces: make(map[string]reflect.Type),
@@ -181,6 +183,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 	// TODO: If T is an interface then check will have to be performed at run-time (maybe it's an Htmler which is also a Csver)..
 
 	s.mux.HandleFunc(Path, func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, int64(s.MaxPostSize))
 		req := &Request{
 			req:             r,
 			startTime:       time.Now(),
@@ -239,6 +242,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		// TODO: Error if event-stream and not supported on route...
 		if r.Header.Get("Accept") == "text/event-stream" && route.eventStream != nil {
 			if err := readBody(req, new(B)); err != nil {
+				s.Logger.LogError(req, err)
 				s.errorHandler.Apply(req, http.StatusBadRequest, w)
 				return
 			}
@@ -334,9 +338,8 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			}
 		}
 
-		// TODO: Setup location for uploaded files to go
-		// TODO: Configurable max upload size
 		if err := readBody(req, new(B)); err != nil {
+			s.Logger.LogError(req, err)
 			s.errorHandler.Apply(req, http.StatusBadRequest, w)
 			return
 		}

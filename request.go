@@ -55,7 +55,7 @@ func (rdr *bodySizeReader) Write(buf []byte) (n int, err error) {
 }
 
 // TODO: determine ahead of time if B implements the required interfaceDoes it implement interface for content type?
-// TODO: Configurable max upload size
+// TODO: instead of returning error, return *ErrorCode
 func readBody[B any](req *Request, body *B) error {
 	sizer := new(bodySizeReader)
 	defer func() {
