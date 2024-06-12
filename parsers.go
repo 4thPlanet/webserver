@@ -1,21 +1,23 @@
 package webserver
 
 import (
+	"errors"
 	"io"
 	"mime/multipart"
+	"net/http"
 	"net/url"
 )
 
 type FormDataParser interface {
-	ParseFormData(io.Reader) error
+	ParseFormData(io.Reader) *Error
 }
 
 type MultipartFormDataParser interface {
-	ParseMultipartFormData(io.Reader, string) error
+	ParseMultipartFormData(io.Reader, string) *Error
 }
 
 type PlainTextParser interface {
-	ParsePlainText(io.Reader) error
+	ParsePlainText(io.Reader) *Error
 }
 
 type RequestBody struct {
@@ -23,26 +25,31 @@ type RequestBody struct {
 	Files map[string][]multipart.File
 }
 
-func (body *RequestBody) ParseFormData(rdr io.Reader) error {
+func (body *RequestBody) ParseFormData(rdr io.Reader) *Error {
 	data, err := io.ReadAll(rdr)
 	if err != nil {
-		return err
+		return &Error{Code: http.StatusInternalServerError, Error: err}
 	}
 
 	values, err := url.ParseQuery(string(data))
 	if err != nil {
-		return err
+		return &Error{Code: http.StatusBadRequest, Error: err}
 	}
 	body.Values = values
 	return nil
 
 }
 
-func (body *RequestBody) ParseMultipartFormData(rdr io.Reader, boundary string) error {
+func (body *RequestBody) ParseMultipartFormData(rdr io.Reader, boundary string) *Error {
 	mpr := multipart.NewReader(rdr, boundary)
 	form, err := mpr.ReadForm(1024 * 1024 * 10)
 	if err != nil {
-		return err
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			return &Error{Code: http.StatusRequestEntityTooLarge, Error: err}
+		} else {
+			return &Error{Code: http.StatusBadRequest, Error: err}
+		}
 	}
 	body.Values = form.Value
 	body.Files = make(map[string][]multipart.File)
@@ -51,7 +58,7 @@ func (body *RequestBody) ParseMultipartFormData(rdr io.Reader, boundary string) 
 		for fdx, header := range headers {
 			file, err := header.Open()
 			if err != nil {
-				return err
+				return &Error{Code: http.StatusInternalServerError, Error: err}
 			}
 
 			// This will need to be closed after being read.

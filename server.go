@@ -40,7 +40,7 @@ type Server[S any] struct {
 	errorHandler          *errorHandler[S]
 }
 
-type Middleware func(req *Request) *ErrorCode
+type Middleware func(req *Request) *Error
 type WebsocketHandler func(req *Request, inFeed <-chan []byte) <-chan []byte
 type EventStreamHandler func(req *Request) <-chan EventStreamer
 
@@ -164,7 +164,7 @@ func (s *Server[S]) determineResponseInterface(acceptHeader string, implementsMa
 }
 
 // You're not able to use generics on a method, so going through a public function which accepts the Server object is the least-bad way to get type safety in the handlers.
-func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers map[Verb]func(req *Request) (T, *ErrorCode)) *Route[B, T] {
+func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers map[Verb]func(req *Request) (T, *Error)) *Route[B, T] {
 
 	route := &Route[B, T]{
 		path:        Path,
@@ -198,58 +198,58 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			req:   req,
 		}
 
-		err := session.load(context.TODO())
+		if err := session.load(context.TODO()); err != nil {
+			s.Logger.LogError(req, fmt.Errorf("Error loading session: %v", err))
+		}
 
-		runMiddlewares := func() *ErrorCode {
+		runMiddlewares := func() *Error {
 			for _, mw := range s.middlewares {
-				errorCode := mw(req)
-				if errorCode != nil {
-					s.errorHandler.Apply(req, *errorCode, w)
-					return errorCode
+				err := mw(req)
+				if err != nil {
+					s.errorHandler.Apply(req, *err, w)
+					return err
 				}
 			}
 
 			for _, mw := range route.middlewares {
-				errorCode := mw(req)
-				if errorCode != nil {
-					s.errorHandler.Apply(req, *errorCode, w)
-					return errorCode
+				err := mw(req)
+				if err != nil {
+					s.errorHandler.Apply(req, *err, w)
+					return err
 				}
 			}
 			return nil
 		}
 
-		if err != nil {
-			s.Logger.LogError(req, fmt.Errorf("Error loading session: %v", err))
-		}
 		req.Session = session.Data
 
 		// before v1.22, Verb can't be included in the Pattern
-		req.Verb, err = ParseVerb(r.Method)
-		if err != nil {
+		var verbErr error
+		req.Verb, verbErr = ParseVerb(r.Method)
+		if verbErr != nil {
 			// https://stackoverflow.com/questions/72217705/http-response-status-for-unknown-nonexistent-http-method
-			s.errorHandler.Apply(req, http.StatusNotImplemented, w)
+			s.errorHandler.Apply(req, Error{Code: http.StatusNotImplemented}, w)
 			return
 		}
 		session.req = req
 
 		handler, isset := handlers[req.Verb]
 		if !isset {
-			s.errorHandler.Apply(req, http.StatusMethodNotAllowed, w)
+			s.errorHandler.Apply(req, Error{Code: http.StatusMethodNotAllowed}, w)
 			return
 		}
 
 		// TODO: Error if event-stream and not supported on route...
 		if r.Header.Get("Accept") == "text/event-stream" && route.eventStream != nil {
 			if err := readBody(req, new(B)); err != nil {
-				s.Logger.LogError(req, err)
-				s.errorHandler.Apply(req, http.StatusBadRequest, w)
+				s.Logger.LogError(req, err.Error)
+				s.errorHandler.Apply(req, *err, w)
 				return
 			}
 
-			errorCode := runMiddlewares()
-			if errorCode != nil {
-				s.errorHandler.Apply(req, *errorCode, w)
+			err := runMiddlewares()
+			if err != nil {
+				s.errorHandler.Apply(req, *err, w)
 				return
 			}
 
@@ -276,21 +276,21 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		// TODO: protocol check
 		if r.Header.Get("Upgrade") == "websocket" && route.websocket != nil {
 
-			errorCode := runMiddlewares()
-			if errorCode != nil {
-				s.errorHandler.Apply(req, *errorCode, w)
+			err := runMiddlewares()
+			if err != nil {
+				s.errorHandler.Apply(req, *err, w)
 				return
 			}
 
 			var closedConnectionError = &wsutil.ClosedError{}
 			in := make(chan []byte)
 
-			conn, _, _, err := ws.UpgradeHTTP(r, w)
+			conn, _, _, upgradeErr := ws.UpgradeHTTP(r, w)
 
-			if err != nil {
+			if upgradeErr != nil {
 				// handle error
-				s.Logger.LogError(req, fmt.Errorf("Error upgrading websocket connection! %v", err))
-				s.errorHandler.Apply(req, http.StatusInternalServerError, w)
+				s.Logger.LogError(req, fmt.Errorf("Error upgrading websocket connection! %v", upgradeErr))
+				s.errorHandler.Apply(req, Error{Code: http.StatusInternalServerError, Error: upgradeErr}, w)
 				return
 			}
 			ctx, cancel := context.WithCancel(req.Context)
@@ -319,9 +319,9 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 			for msg := range out {
 				// TODO: Allow for Binary vs Text messages
-				err = wsutil.WriteServerMessage(conn, ws.OpText, msg)
+				wsErr := wsutil.WriteServerMessage(conn, ws.OpText, msg)
 				if err != nil {
-					s.Logger.LogError(req, fmt.Errorf("Error writing message: %v", err))
+					s.Logger.LogError(req, fmt.Errorf("Error writing message: %v", wsErr))
 				}
 
 			}
@@ -333,33 +333,30 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 		if responseInterface == nil {
 			// if T implements io.Reader then interface will be that
 			if !isReader {
-				s.errorHandler.Apply(req, http.StatusNotAcceptable, w)
+				s.errorHandler.Apply(req, Error{Code: http.StatusNotAcceptable}, w)
 				return
 			}
 		}
 
 		if err := readBody(req, new(B)); err != nil {
-			s.Logger.LogError(req, err)
-			s.errorHandler.Apply(req, http.StatusBadRequest, w)
+			s.Logger.LogError(req, err.Error)
+			s.errorHandler.Apply(req, *err, w)
 			return
 		}
 
-		errorCode := runMiddlewares()
-		if errorCode != nil {
-			s.errorHandler.Apply(req, *errorCode, w)
+		if err := runMiddlewares(); err != nil {
+			s.errorHandler.Apply(req, *err, w)
 			return
 		}
 
-		response, errorCode := handler(req)
+		response, err := handler(req)
 
-		if errorCode != nil {
-			s.errorHandler.Apply(req, *errorCode, w)
+		if err != nil {
+			s.errorHandler.Apply(req, *err, w)
 			return
 		} else {
 
-			if req.ResponseCode > 0 {
-				w.WriteHeader(req.ResponseCode)
-			} else {
+			if req.ResponseCode == 0 {
 				req.ResponseCode = 200
 			}
 
@@ -369,11 +366,11 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 			} else {
 				rdr := (interface{})(response).(io.Reader)
-
-				b, err = io.ReadAll(rdr)
-				if err != nil {
+				var rdrErr error
+				b, rdrErr = io.ReadAll(rdr)
+				if rdrErr != nil {
 					s.Logger.LogError(req, fmt.Errorf("Error reading from Reader: %v", err))
-					s.errorHandler.Apply(req, http.StatusInternalServerError, w)
+					s.errorHandler.Apply(req, Error{Code: http.StatusInternalServerError}, w)
 					return
 				}
 			}
@@ -386,7 +383,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 			}
 
 			req.responseSize = uint(len(b))
-			err = writeWithContentEncoding(b, r.Header.Get("Accept-Encoding"), w)
+			err = writeWithContentEncoding(b, r.Header.Get("Accept-Encoding"), w, req.ResponseCode)
 			if err != nil {
 				s.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", err))
 			}
@@ -399,7 +396,7 @@ func ApplyRoute[T any, S any, B any](s *Server[S], Path string, body B, handlers
 
 }
 
-func writeWithContentEncoding(content []byte, acceptEncodingHeader string, w http.ResponseWriter) error {
+func writeWithContentEncoding(content []byte, acceptEncodingHeader string, w http.ResponseWriter, statusCode int) error {
 	if len(content) == 0 {
 		return nil
 	}
@@ -410,19 +407,19 @@ ENCODINGLOOP:
 	for _, encoding := range encodings {
 		switch strings.TrimSpace(encoding) {
 		case "gzip":
-			w.Header().Add("Content-Encoding", "gzip")
+			w.Header().Set("Content-Encoding", "gzip")
 			encoding := gzip.NewWriter(w)
 			defer encoding.Flush()
 			writer = encoding
 			break ENCODINGLOOP
 		case "deflate":
-			w.Header().Add("Content-Encoding", "deflate")
+			w.Header().Set("Content-Encoding", "deflate")
 			encoding, _ := flate.NewWriter(w, flate.DefaultCompression)
 			defer encoding.Flush()
 			writer = encoding
 			break ENCODINGLOOP
 		case "br":
-			w.Header().Add("Content-Encoding", "br")
+			w.Header().Set("Content-Encoding", "br")
 			encoding := brotli.NewWriter(w)
 			defer encoding.Flush()
 			writer = encoding
@@ -434,6 +431,7 @@ ENCODINGLOOP:
 
 		}
 	}
+	w.WriteHeader(statusCode)
 	_, err := writer.Write(content)
 	return err
 }
@@ -462,8 +460,8 @@ func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
 			return fs.SkipDir
 		}
 
-		ApplyRoute(s, pathPrefix+path+"/", RequestBody{}, map[Verb]func(req *Request) (*bytes.Buffer, *ErrorCode){
-			GET: func(req *Request) (*bytes.Buffer, *ErrorCode) {
+		ApplyRoute(s, pathPrefix+path+"/", RequestBody{}, map[Verb]func(req *Request) (*bytes.Buffer, *Error){
+			GET: func(req *Request) (*bytes.Buffer, *Error) {
 				hashCheck := req.Headers.Get("If-None-Match")
 				if hashCheck > "" && fileHashMap[req.Path] == hashCheck {
 					// return 304
@@ -473,12 +471,12 @@ func (s *Server[S]) PublicRoute(dirPath string, pathPrefix string) {
 
 				b, err := os.ReadFile(dirPath + req.Path)
 				if err != nil {
-					var internalServerError ErrorCode
+					var internalServerError Error
 					if errors.Is(err, os.ErrNotExist) {
 						s.Logger.LogError(req, fmt.Errorf("FILE NOT FOUND!!"))
-						internalServerError = ErrorCode(http.StatusNotFound)
+						internalServerError = Error{Code: http.StatusNotFound}
 					} else {
-						internalServerError = ErrorCode(http.StatusInternalServerError)
+						internalServerError = Error{Code: http.StatusInternalServerError}
 					}
 
 					return nil, &internalServerError

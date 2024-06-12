@@ -9,7 +9,11 @@ import (
 
 // Error Code is an http Status Code >= 400
 // Setting to [123]xx could result in unexpected behavior
-type ErrorCode uint
+
+type Error struct {
+	Code  uint
+	Error error
+}
 
 type errorHandler[S any] struct {
 	server     *Server[S]
@@ -18,22 +22,20 @@ type errorHandler[S any] struct {
 	isReader   bool
 }
 
-func (err *errorHandler[S]) Apply(req *Request, statusCode ErrorCode, w http.ResponseWriter) {
-	w.WriteHeader(int(statusCode))
-	if err != nil {
+func (handler *errorHandler[S]) Apply(req *Request, err Error, w http.ResponseWriter) {
+	if handler != nil {
 		var (
 			buf []byte
 		)
-		responseInterface := err.server.determineResponseInterface(req.Headers.Get("Accept"), err.implements)
-		response := err.fn.Call([]reflect.Value{
+		responseInterface := handler.server.determineResponseInterface(req.Headers.Get("Accept"), handler.implements)
+		response := handler.fn.Call([]reflect.Value{
 			reflect.ValueOf(req),
-			reflect.ValueOf(statusCode),
+			reflect.ValueOf(err),
 		})[0].Interface()
 
 		if responseInterface != nil {
 			buf = deliverContentAsInterface(response, responseInterface)
-
-		} else if err.isReader {
+		} else if handler.isReader {
 			var e error
 			rdr := response.(io.Reader)
 
@@ -45,18 +47,18 @@ func (err *errorHandler[S]) Apply(req *Request, statusCode ErrorCode, w http.Res
 			}
 		}
 		req.responseSize = uint(len(buf))
-		e := writeWithContentEncoding(buf, req.Headers.Get("Accept-Encoding"), w)
+		e := writeWithContentEncoding(buf, req.Headers.Get("Accept-Encoding"), w, int(err.Code))
 		if e != nil {
-			err.server.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", e))
+			handler.server.Logger.LogError(req, fmt.Errorf("Error writing response content: %v", e))
 		}
-		err.server.Logger.LogRequest(req)
+		handler.server.Logger.LogRequest(req)
 
 	}
 }
 
 // Specify the function for Server s to call when an error code is returned.
 // It can return any type T, it will be delivered under the same rules as any given route's returned data type
-func ApplyErrorHandler[T any, S any](s *Server[S], fn func(req *Request, code ErrorCode) T) {
+func ApplyErrorHandler[T any, S any](s *Server[S], fn func(req *Request, code Error) T) {
 	s.errorHandler = &errorHandler[S]{
 		fn:         reflect.ValueOf(fn),
 		implements: map[string]bool{},

@@ -55,8 +55,7 @@ func (rdr *bodySizeReader) Write(buf []byte) (n int, err error) {
 }
 
 // TODO: determine ahead of time if B implements the required interfaceDoes it implement interface for content type?
-// TODO: instead of returning error, return *ErrorCode
-func readBody[B any](req *Request, body *B) error {
+func readBody[B any](req *Request, body *B) *Error {
 	sizer := new(bodySizeReader)
 	defer func() {
 		req.bodySize = uint(sizer.Size)
@@ -68,8 +67,7 @@ func readBody[B any](req *Request, body *B) error {
 	if _, err := bodyRdr.Peek(1); err == nil {
 		mediaType, params, err := mime.ParseMediaType(req.Headers.Get("Content-Type"))
 		if err != nil {
-			return err
-			//			w.WriteHeader(http.StatusBadRequest)
+			return &Error{Code: http.StatusBadRequest, Error: err}
 		}
 		switch mediaType {
 		case "application/x-www-form-urlencoded":
@@ -78,7 +76,6 @@ func readBody[B any](req *Request, body *B) error {
 				err := parser.ParseFormData(bodyRdr)
 				if err != nil {
 					return err
-					//					w.WriteHeader(http.StatusBadRequest)
 				}
 			}
 		case "multipart/form-data":
@@ -87,20 +84,16 @@ func readBody[B any](req *Request, body *B) error {
 				err := parser.ParseMultipartFormData(bodyRdr, params["boundary"])
 				if err != nil {
 					return err
-					//			w.WriteHeader(http.StatusBadRequest)
 				}
-
 			}
 		case "application/json":
 			reqBody, err := io.ReadAll(bodyRdr)
 			if err != nil {
-				return err
-				//				w.WriteHeader(http.StatusInternalServerError)
+				return &Error{Code: http.StatusInternalServerError, Error: err}
 			}
 			err = json.Unmarshal(reqBody, body)
 			if err != nil {
-				return err
-				//				w.WriteHeader(http.StatusBadRequest)
+				return &Error{Code: http.StatusBadRequest, Error: err}
 			}
 		case "text":
 			parser, ok := (interface{}(body)).(PlainTextParser)
@@ -108,12 +101,11 @@ func readBody[B any](req *Request, body *B) error {
 				err := parser.ParsePlainText(bodyRdr)
 				if err != nil {
 					return err
-					//			w.WriteHeader(http.StatusBadRequest)
 				}
 			}
 
 		default:
-			return fmt.Errorf("Unsupported content type %s", req.Headers.Get("Content-Type"))
+			return &Error{Code: http.StatusUnsupportedMediaType, Error: fmt.Errorf("Unsupported media type [%s] parsed from header [%s]", mediaType, req.Headers.Get("Content-Type"))}
 		}
 		req.Body = *body
 	}
